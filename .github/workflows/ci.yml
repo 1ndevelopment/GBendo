@@ -1,0 +1,155 @@
+name: CI/CD
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    name: Build and Test (${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+            cflags: "-Wall -Wextra -O2 -g"
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+            cflags: "-Wall -Wextra -O2 -g"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache object files
+        uses: actions/cache@v3
+        with:
+          path: |
+            obj/
+            tests/*.o
+          key: ${{ runner.os }}-${{ matrix.compiler }}-${{ hashFiles('**/*.c', '**/*.h', 'Makefile') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.compiler }}-
+            ${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang libsdl2-dev libsdl2-image-dev pkg-config
+
+      - name: Build main executable
+        env:
+          CC: ${{ matrix.cc }}
+          CFLAGS: ${{ matrix.cflags }}
+        run: make
+
+      - name: Build test binaries
+        env:
+          CC: ${{ matrix.cc }}
+          CFLAGS: ${{ matrix.cflags }}
+        run: make build-tests
+
+      - name: Set up logging
+        run: |
+          # Create logs directory
+          mkdir -p ${{ github.workspace }}/logs
+          # Create initial log files
+          echo "Log files initialized at $(date)" > ${{ github.workspace }}/logs/init.log
+          echo "Build environment setup..." > ${{ github.workspace }}/logs/build.log
+          echo "Test execution log..." > ${{ github.workspace }}/logs/tests.log
+          # Verify creation
+          ls -la ${{ github.workspace }}/logs/
+
+      - name: Run tests with logging
+        run: |
+          # Debug: Show current directory and logs directory
+          pwd
+          ls -la ${{ github.workspace }}/logs/
+          
+          # Capture environment information
+          {
+            echo "=== Build Environment ==="
+            echo "Compiler: ${{ matrix.cc }}"
+            echo "CFLAGS: ${{ matrix.cflags }}"
+            echo "Workspace: ${{ github.workspace }}"
+            echo "Current directory: $(pwd)"
+            echo "Directory contents:"
+            ls -la tests/
+            echo "=================="
+          } 2>&1 | tee -a ${{ github.workspace }}/logs/build.log
+          
+          # Run tests using Makefile test target
+          echo "=== Starting Test Execution at $(date) ===" | tee -a ${{ github.workspace }}/logs/tests.log
+          {
+            make test
+          } 2>&1 | tee -a ${{ github.workspace }}/logs/tests.log
+          
+          # Verify logs exist and have content
+          echo "=== Log File Status ===" | tee -a ${{ github.workspace }}/logs/build.log
+          ls -l ${{ github.workspace }}/logs/ | tee -a ${{ github.workspace }}/logs/build.log
+          
+          # Create a summary file
+          {
+            echo "=== Test Summary ==="
+            date "+%Y-%m-%d %H:%M:%S"
+            echo "Compiler: ${{ matrix.compiler }}"
+            echo "===================="
+            grep "PASSED\|FAILED" logs/tests.log || true
+          } > logs/summary.log
+          
+          # List all log files for verification
+          echo "=== Generated Log Files ==="
+          ls -l logs/
+
+      - name: Prepare logs for upload
+        if: always()
+        run: |
+          # Ensure we have something to upload
+          echo "=== Final Log Status at $(date) ===" >> ${{ github.workspace }}/logs/final.log
+          echo "Compiler: ${{ matrix.compiler }}" >> ${{ github.workspace }}/logs/final.log
+          ls -lR ${{ github.workspace }}/logs/ >> ${{ github.workspace }}/logs/final.log
+          
+          # Debug output
+          echo "=== Debug: Log Directory Contents ==="
+          ls -lR ${{ github.workspace }}/logs/
+          
+          # Ensure logs are readable
+          chmod -R a+r ${{ github.workspace }}/logs/
+
+      - name: Generate artifact metadata
+        id: metadata
+        run: |
+          # Generate date in UTC (DDMMYYYY)
+          DATE=$(date "+%yww%W.%u")
+          echo "date=$DATE" >> $GITHUB_OUTPUT
+          
+          # Get architecture
+          ARCH=$(uname -m)
+          echo "arch=$ARCH" >> $GITHUB_OUTPUT
+          
+          echo "Date: $DATE"
+          echo "Architecture: $ARCH"
+
+      - name: Upload gbendo binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: gbendo-${{ matrix.compiler }}-${{ steps.metadata.outputs.arch }}-${{ steps.metadata.outputs.date }}
+          path: gbendo
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-${{ matrix.compiler }}-${{ steps.metadata.outputs.arch }}-${{ steps.metadata.outputs.date }}
+          path: |
+            ${{ github.workspace }}/logs/*.log
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 9
